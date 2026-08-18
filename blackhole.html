@@ -6,7 +6,7 @@
 <title>Interstellar Black Hole — Geodesic Raytracer</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
-  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
   canvas:active { cursor: grabbing; }
   #hud {
     position: fixed; left: 14px; bottom: 14px;
@@ -56,7 +56,6 @@ uniform float uFov;     // tan(half vertical fov)
 uniform float uSpin;    // +1 / -1 disk rotation sense
 
 const float RS     = 1.0;   // Schwarzschild radius (units of rs)
-const float RPH    = 1.5;   // photon sphere
 const float RIN    = 3.0;   // disk inner radius (ISCO-ish)
 const float ROUT   = 9.0;   // disk outer radius (nominal; edge fades beyond this)
 const float RFADE  = 3.5;   // width of the wispy, semi-transparent outer fade
@@ -138,14 +137,12 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // brightness peaks at the ISCO, decays outward (Novikov-Thorne-like),
   // and fades inward through the free-fall "plunge region" toward the horizon
   float x = r / RIN;
-  float radial;
-  float innerAlpha = 1.0;
-  if (x >= 1.0) {
-    radial = 1.9 * exp(-(x - 1.0) * 0.95);
-  } else {
-    radial = 1.9 * exp(-(1.0 - x) * 2.5) * smoothstep(RS, RS + 0.8, r);
-    innerAlpha = smoothstep(RS, RS + 1.2, r);   // optically thin near the horizon
-  }
+  // Blend the two decay regimes across the ISCO (C1-continuous), so brightness
+  // still peaks exactly at r = RIN but no hard ring appears there.
+  float radialIn  = 1.9 * exp(-(1.0 - x) * 2.5) * smoothstep(RS, RS + 0.8, r);
+  float radialOut = 1.9 * exp(-(x - 1.0) * 0.95);
+  float radial    = mix(radialIn, radialOut, smoothstep(0.75, 1.25, x));
+  float innerAlpha = smoothstep(RS, RS + 1.2, r);   // optically thin near the horizon
 
   // --- turbulent, differentially-rotating dust (Interstellar-style) ---
   // Differential rotation winds any fixed pattern into threads: the
@@ -200,8 +197,10 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // --- wispy outer edge: noise-wobbled boundary fading to transparent ---
   float edge = ROUT + (dust - 0.5) * 2.5;           // ragged, rotating boundary
   float fade = 1.0 - smoothstep(edge, edge + RFADE, r);
-  // patchy wisps in the fade zone; fully opaque inside the nominal disk
-  float wisp = mix(smoothstep(0.15, 0.65, dust), 1.0, step(r, ROUT));
+  // patchy wisps inside the disk that solidify smoothly by the nominal outer
+  // radius, so opacity never snaps at exactly r = ROUT
+  float wisp = mix(smoothstep(0.15, 0.65, dust), 1.0,
+                   smoothstep(ROUT - 2.5, ROUT, r));
   float alpha = clamp(fade * wisp * innerAlpha, 0.0, 1.0);
 
   ocol = blackbody(t) * radial * tex * beam * 2.4;
@@ -305,7 +304,7 @@ void main(){
     }
 
     // fell through horizon
-    if (r2 < RS || r2 < 1.001) {
+    if (r2 <= RS + 0.05) {
       done = true;
       break;
     }
@@ -332,15 +331,28 @@ void main(){
 precision mediump float;
 uniform sampler2D uTex;
 uniform vec2  uDir;   // (1/res.x, 1/res.y) scaled
+uniform float uThresh;      // bright-pass threshold; 0.0 = plain blur
 varying vec2 vUv;
+
+// sample the texture, optionally high-passing above uThresh. At 0.0 this is
+// identity (a plain 5-tap tap); otherwise only the luminous pixels feed the
+// blur, so the glow reads as the bright disk + lensed stars, not a wash.
+vec3 thr(vec2 uv){
+  vec3 c = texture2D(uTex, uv).rgb;
+  if (uThresh > 0.0){
+    float m = max(max(c.r, c.g), c.b);
+    c *= smoothstep(uThresh, uThresh + 0.2, m);
+     }
+  return c;
+}
 
 void main(){
   vec2 off = uDir;
-  vec3 c = texture2D(uTex, vUv).rgb * 0.227027;
-  c += texture2D(uTex, vUv + off * 1.3836).rgb * 0.316216;
-  c += texture2D(uTex, vUv - off * 1.3836).rgb * 0.316216;
-  c += texture2D(uTex, vUv + off * 3.2304).rgb * 0.070270;
-  c += texture2D(uTex, vUv - off * 3.2304).rgb * 0.070270;
+  vec3 c = thr(vUv) * 0.227027;
+  c += thr(vUv + off * 1.3836) * 0.316216;
+  c += thr(vUv - off * 1.3836) * 0.316216;
+  c += thr(vUv + off * 3.2304) * 0.070270;
+  c += thr(vUv - off * 3.2304) * 0.070270;
   gl_FragColor = vec4(c, 1.0);
 }
 </script>
@@ -349,13 +361,16 @@ void main(){
 precision mediump float;
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
-uniform float uBloomStrength;
+uniform sampler2D uBloomWide;
+uniform float uStrength;        // narrow   (half-res)   bloom weight
+uniform float uStrengthWide;    // wide     (quarter-res) bloom weight
 varying vec2 vUv;
 void main(){
-  vec3 s = texture2D(uScene, vUv).rgb;
-  vec3 b = texture2D(uBloom, vUv).rgb;
-  vec3 c = s + b * uBloomStrength;
-  gl_FragColor = vec4(c, 1.0);
+  vec3 s     = texture2D(uScene, vUv).rgb;
+  vec3 b     = texture2D(uBloom, vUv).rgb;
+  vec3 bw    = texture2D(uBloomWide, vUv).rgb;
+  vec3 c = s + b * uStrength + bw * uStrengthWide;
+  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 </script>
 
@@ -426,20 +441,29 @@ void main(){
     return { tex, fbo, w, h };
   }
 
-  let sceneT = null, blurA = null, blurB = null, W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0;
-  let quality = 0.7; // internal raymarch resolution scale (keys 1/2/3 switch)
+   // Coarse pointer (touch screen): start lighter so the first frames are
+   // smooth instead of stalling on the full-resolution raymarch.
+  const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
+                 || (navigator.maxTouchPointers || 0) > 0;
+  let sceneT = null, blurA = null, blurB = null, qA = null, qB = null,
+      W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0, QW = 0, QH = 0;
+  let quality = coarse ? 0.5 : 0.7; // internal raymarch resolution (keys 1/2/3)
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, coarse ? 1.0 : 1.5);
     W = canvas.width  = Math.max(2, Math.floor(canvas.clientWidth  * dpr));
     H = canvas.height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
     SW = Math.max(2, Math.floor(W * quality));
     SH = Math.max(2, Math.floor(H * quality));
     BW = Math.max(2, SW >> 1);
     BH = Math.max(2, SH >> 1);
+    QW = Math.max(2, BW >> 1);
+    QH = Math.max(2, BH >> 1);
     sceneT = makeTarget(SW, SH);
     blurA = makeTarget(BW, BH);
     blurB = makeTarget(BW, BH);
+    qA = makeTarget(QW, QH);
+    qB = makeTarget(QW, QH);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -470,23 +494,49 @@ void main(){
     return { eye, fwd, right, up };
   }
 
-  let dragging = false, lx = 0, ly = 0;
+   // Interaction: one finger / mouse orbits, two fingers pinch-zoom.
+   // Pointers are tracked by id so a multi-touch gesture reads like an image
+   // viewer, not a page scroll (which needs touch-action:none on the canvas).
+   // setPointerCapture is best-effort: a handful of mobile browsers throw on it.
+  const pointers = new Map();     // pointerId -> {x, y} current position
+  let dragging = false;
+  let pinchLast = 0;             // last two-finger distance; 0 while no pinch
+  function setDist(v){ dist = Math.max(3.5, Math.min(45.0, v)); }
 
   canvas.addEventListener('pointerdown', e => {
-    dragging = true;
-    lx = e.clientX; ly = e.clientY;
-    canvas.setPointerCapture(e.pointerId);
-  });
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const a = [...pointers.values()];
+    pinchLast = (a.length >= 2)
+        ? Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) : 0;
+    dragging = pointers.size > 0;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_e) {}
+    });
   canvas.addEventListener('pointermove', e => {
-    if (!dragging) return;
-    const dx = e.clientX - lx, dy = e.clientY - ly;
-    lx = e.clientX; ly = e.clientY;
-    yaw   -= dx * 0.005;
-    pitch -= dy * 0.005;
-    pitch = Math.max(-1.45, Math.min(1.45, pitch));
-  });
-  canvas.addEventListener('pointerup', e => { dragging = false; });
-  canvas.addEventListener('pointercancel', () => { dragging = false; });
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    if (pointers.size === 1) {
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      yaw      -= dx * 0.005;
+      pitch    -= dy * 0.005;
+      pitch = Math.max(-1.45, Math.min(1.45, pitch));
+      } else {
+        // two or more fingers: pinch to zoom (spreading apart = zoom in)
+      p.x = e.clientX; p.y = e.clientY;
+      const a = [...pointers.values()];
+      const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
+      if (pinchLast > 0.0) setDist(dist * (pinchLast / d));
+      pinchLast = d;
+      }
+    });
+  function endPointer(e){
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchLast = 0;
+    dragging = pointers.size > 0;
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_e) {}
+    }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
     dist *= Math.exp(e.deltaY * 0.0012);
@@ -509,7 +559,7 @@ void main(){
     if (fpsAcc >= 0.5) {
       fpsShown = Math.round(fpsN / fpsAcc);
       fpsAcc = 0; fpsN = 0;
-      hud.innerHTML = '<b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality<br>'
+      hud.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality<br>'
                     + fpsShown + ' fps · ' + SW + '×' + SH + ' render';
     }
 
@@ -533,18 +583,35 @@ void main(){
     gl.useProgram(progBlur);
     const uTex = gl.getUniformLocation(progBlur, 'uTex');
     const uDir = gl.getUniformLocation(progBlur, 'uDir');
+    const uThresh = gl.getUniformLocation(progBlur, 'uThresh');
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, blurA.fbo);
     gl.viewport(0, 0, BW, BH);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
     gl.uniform1i(uTex, 0);
+    gl.uniform1f(uThresh, 0.7);
     gl.uniform2f(uDir, 1.0 / BW, 0.0);
     quad(progBlur);
 
+    gl.uniform1f(uThresh, 0.0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, blurB.fbo);
     gl.bindTexture(gl.TEXTURE_2D, blurA.tex);
     gl.uniform2f(uDir, 0.0, 1.0 / BH);
+    quad(progBlur);
+
+      // octave 2: downsample the half-res bloom to quarter res for a wide, soft halo
+    gl.bindFramebuffer(gl.FRAMEBUFFER, qA.fbo);
+    gl.viewport(0, 0, QW, QH);
+    gl.bindTexture(gl.TEXTURE_2D, blurB.tex);
+    gl.uniform1f(uThresh, 0.0);
+    gl.uniform2f(uDir, 1.0 / QW, 0.0);
+    quad(progBlur);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, qB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, qA.tex);
+    gl.uniform1f(uThresh, 0.0);
+    gl.uniform2f(uDir, 0.0, 1.0 / QH);
     quad(progBlur);
 
     // ---- composite to screen (upscale) ----
@@ -557,7 +624,11 @@ void main(){
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, blurB.tex);
     gl.uniform1i(gl.getUniformLocation(progComp, 'uBloom'), 1);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uBloomStrength'), 0.85);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, qB.tex);
+    gl.uniform1i(gl.getUniformLocation(progComp, 'uBloomWide'), 2);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.5);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.9);
     quad(progComp);
 
     requestAnimationFrame(render);
