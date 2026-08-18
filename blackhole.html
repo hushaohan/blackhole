@@ -27,7 +27,7 @@
 <canvas id="gl"></canvas>
 <div id="err"></div>
 <div id="hud">
-  <b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality
+  <b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset
 </div>
 
 <script id="vsQuad" type="x-shader/x-vertex">
@@ -441,20 +441,18 @@ void main(){
     return { tex, fbo, w, h };
   }
 
-   // Coarse pointer (touch screen): start lighter so the first frames are
-   // smooth instead of stalling on the full-resolution raymarch.
+   // Coarse pointer (touch screen): only affects the pinch/scroll HUD hint.
   const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
                  || (navigator.maxTouchPointers || 0) > 0;
   let sceneT = null, blurA = null, blurB = null, qA = null, qB = null,
       W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0, QW = 0, QH = 0;
-  let quality = coarse ? 0.5 : 0.7; // internal raymarch resolution (keys 1/2/3)
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, coarse ? 1.0 : 1.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     W = canvas.width  = Math.max(2, Math.floor(canvas.clientWidth  * dpr));
     H = canvas.height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
-    SW = Math.max(2, Math.floor(W * quality));
-    SH = Math.max(2, Math.floor(H * quality));
+    SW = W;
+    SH = H;
     BW = Math.max(2, SW >> 1);
     BH = Math.max(2, SH >> 1);
     QW = Math.max(2, BW >> 1);
@@ -467,12 +465,6 @@ void main(){
   }
   window.addEventListener('resize', resize);
   resize();
-
-  window.addEventListener('keydown', e => {
-    if (e.key === '1') { quality = 0.5; resize(); }
-    if (e.key === '2') { quality = 0.7; resize(); }
-    if (e.key === '3') { quality = 1.0; resize(); }
-  });
 
   // camera
   let yaw = 0.7, pitch = 0.38, dist = 13.0;
@@ -559,7 +551,7 @@ void main(){
     if (fpsAcc >= 0.5) {
       fpsShown = Math.round(fpsN / fpsAcc);
       fpsAcc = 0; fpsN = 0;
-      hud.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality<br>'
+      hud.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset<br>'
                     + fpsShown + ' fps · ' + SW + '×' + SH + ' render';
     }
 
