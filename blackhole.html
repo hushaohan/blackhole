@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interstellar Black Hole — Geodesic Raytracer</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #hud {
+    position: fixed; left: 14px; bottom: 14px;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,0.60); pointer-events: none; user-select: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  #hud b { color: #ffd8a0; }
+  #err {
+    position: fixed; inset: 0; display: none;
+    padding: 40px; color: #ff8080;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap; background: #100;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="err"></div>
+<div id="hud">
+  <b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality
+</div>
+
+<script id="vsQuad" type="x-shader/x-vertex">
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+</script>
+
+<script id="fsScene" type="x-shader/x-fragment">
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec3  uEye;
+uniform vec3  uFwd;
+uniform vec3  uRight;
+uniform vec3  uUp;
+uniform float uFov;     // tan(half vertical fov)
+uniform float uSpin;    // +1 / -1 disk rotation sense
+
+const float RS     = 1.0;   // Schwarzschild radius (units of rs)
+const float RPH    = 1.5;   // photon sphere
+const float RIN    = 3.0;   // disk inner radius (ISCO-ish)
+const float ROUT   = 9.0;   // disk outer radius (nominal; edge fades beyond this)
+const float RFADE  = 3.5;   // width of the wispy, semi-transparent outer fade
+const float RESC   = 45.0;  // escape radius -> sample sky
+const int  MAXSTEP = 1200;
+
+// ---------- math helpers ----------
+float hash31(vec3 p){
+  return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+float noise3(vec3 p){
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash31(i+vec3(0,0,0)), hash31(i+vec3(1,0,0)), f.x),
+        mix(hash31(i+vec3(0,1,0)), hash31(i+vec3(1,1,0)), f.x), f.y),
+    mix(mix(hash31(i+vec3(0,0,1)), hash31(i+vec3(1,0,1)), f.x),
+        mix(hash31(i+vec3(0,1,1)), hash31(i+vec3(1,1,1)), f.x), f.y),
+    f.z);
+}
+float fbm(vec3 p){
+  float a = 0.5, s = 0.0;
+  for(int i=0;i<4;i++){ s += a * noise3(p); p *= 2.03; a *= 0.5; }
+  return s;
+}
+
+float A(float r){ return 1.0 - RS / r; }
+float Ap(float r){ return RS / (r * r); }
+
+// --- orbital-plane null geodesic integrator (no polar singularity) ---
+// Every photon stays in the plane spanned by (eye, ray direction). In-plane
+// state is (r, psi, dr/dλ, dψ/dλ) with conserved E² = A(r0) from the init.
+// This avoids the spherical-coordinate singularity at the poles entirely.
+vec2 accel2(float r, float drdl, float dpsidl, float E2){
+  float aa  = A(r);
+  float aap = Ap(r);
+  float rdd   = -(aap * E2) / (2.0 * aa)
+              + (aap / (2.0 * aa)) * drdl * drdl
+              + r * aa * dpsidl * dpsidl;
+  float psidd = -2.0 * (drdl / r) * dpsidl;
+  return vec2(rdd, psidd);
+}
+
+// blackbody-ish temperature ramp: 0 = cool red, 1 = hot blue-white
+vec3 blackbody(float t){
+  t = clamp(t, 0.0, 1.0);
+  vec3 c = vec3(1.00, 0.25, 0.055);
+  c = mix(c, vec3(1.00, 0.62, 0.18), smoothstep(0.0, 0.45, t));
+  c = mix(c, vec3(1.00, 0.90, 0.62), smoothstep(0.45, 0.78, t));
+  c = mix(c, vec3(0.82, 0.93, 1.00), smoothstep(0.78, 1.0, t));
+  return c;
+}
+
+// accretion disk emission at a hit point, given photon direction khat.
+// returns color + alpha (alpha fades to 0 across the wispy outer edge)
+void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha){
+  // Keplerian orbital speed (local static observer), relativistic-ish
+  float vv = sqrt(0.5 / (r - RS));
+  float mag = clamp(vv, 0.0, 0.95);
+
+  // tangential direction (counter/clockwise by uSpin)
+  vec3 dirOrb = normalize(cross(vec3(0.0, 0.0, uSpin), hit));
+
+  float betaK = mag * dot(dirOrb, khat);
+  float gamma = 1.0 / sqrt(max(1e-4, 1.0 - mag * mag));
+
+  float gDop  = 1.0 / (gamma * (1.0 - betaK));      // Doppler factor
+  float gGrav = sqrt(A(r));                          // gravitational redshift
+  float g = gDop * gGrav;
+
+  // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
+  float t = pow(clamp(RIN / r, 0.0, 1.0), 0.75);
+
+  // Doppler beaming: approaching side boosted, receding side dimmed
+  float beam = pow(clamp(g, 0.0, 3.0), 3.0);
+
+  // --- radial structure (physically motivated) ---
+  // brightness peaks at the ISCO, decays outward (Novikov-Thorne-like),
+  // and fades inward through the free-fall "plunge region" toward the horizon
+  float x = r / RIN;
+  float radial;
+  float innerAlpha = 1.0;
+  if (x >= 1.0) {
+    radial = 1.9 * exp(-(x - 1.0) * 0.95);
+  } else {
+    radial = 1.9 * exp(-(1.0 - x) * 2.5) * smoothstep(RS, RS + 0.8, r);
+    innerAlpha = smoothstep(RS, RS + 1.2, r);   // optically thin near the horizon
+  }
+
+  // --- turbulent, differentially-rotating dust (Interstellar-style) ---
+  // Differential rotation winds any fixed pattern into threads: the
+  // co-rotating angle t*Omega(r) is radius-dependent, so inner radii lap outer
+  // ones and radially-extended clouds shear into thin arcs. (Advancing the
+  // noise's 3rd coordinate cannot undo this — that rate is radius-dependent
+  // too and just adds shear of its own.) Instead we BOUND the winding:
+  // turbulence is generated in global epochs of length TGEN, chosen so even
+  // the fastest radius rotates only WIND_MAX radians per epoch — not enough
+  // to wind clouds into threads. Near the end of each epoch the pattern
+  // crossfades into a fresh generation with a new random seed. Epoch
+  // boundaries are global (radius-independent), so no radial seams appear,
+  // and the disk stays cloudy indefinitely while still visibly spinning with
+  // differential (Keplerian) rotation.
+  float omega = sqrt(0.5 / (r * r * r));            // Keplerian angular velocity
+  float spinMul = 2.0;                              // visible differential spin
+  float an = atan(hit.y, hit.x);
+
+  float WIND_MAX = 2.0;                             // max radians wound per epoch
+  float OMAX = sqrt(0.5 / (RIN * RIN * RIN)) * spinMul;  // fastest angular velocity
+  float TGEN = WIND_MAX / OMAX;                     // epoch length (~7.3 s)
+
+  float ep  = floor(uTime / TGEN);
+  float age = uTime - ep * TGEN;
+  float u   = age / TGEN;
+
+  float seedA = hash31(vec3(ep, 0.0, 0.0)) * 100.0;
+  float seedB = hash31(vec3(ep + 1.0, 0.0, 0.0)) * 100.0;
+
+  // generation A: born at the epoch start, rotated by age*omega since birth
+  float arA = an - age * omega * spinMul * uSpin;
+  vec2 rpA = r * vec2(cos(arA), sin(arA));
+  float w1A = fbm(vec3(rpA * 1.4, seedA + 3.1));
+  float w2A = fbm(vec3(rpA * 1.4 + vec2(5.2, 1.3), seedA + 7.7));
+  float dust = fbm(vec3(rpA * 2.0 + 1.6 * vec2(w1A, w2A), seedA + 1.9));
+
+  // crossfade into generation B over the last 35% of the epoch.
+  // (u depends only on uTime, so this branch is uniform across all pixels.)
+  if (u > 0.65) {
+    float ageB = age - TGEN;   // B isn't born yet: negative age = pre-rotation
+    float arB = an - ageB * omega * spinMul * uSpin;
+    vec2 rpB = r * vec2(cos(arB), sin(arB));
+    float w1B = fbm(vec3(rpB * 1.4, seedB + 3.1));
+    float w2B = fbm(vec3(rpB * 1.4 + vec2(5.2, 1.3), seedB + 7.7));
+    float dustB = fbm(vec3(rpB * 2.0 + 1.6 * vec2(w1B, w2B), seedB + 1.9));
+    dust = mix(dust, dustB, smoothstep(0.65, 1.0, u));
+  }
+
+  // contrasty dust: dense clumps bright, thin lanes dark
+  float tex = 0.35 + 1.35 * smoothstep(0.25, 0.85, dust);
+
+  // --- wispy outer edge: noise-wobbled boundary fading to transparent ---
+  float edge = ROUT + (dust - 0.5) * 2.5;           // ragged, rotating boundary
+  float fade = 1.0 - smoothstep(edge, edge + RFADE, r);
+  // patchy wisps in the fade zone; fully opaque inside the nominal disk
+  float wisp = mix(smoothstep(0.15, 0.65, dust), 1.0, step(r, ROUT));
+  float alpha = clamp(fade * wisp * innerAlpha, 0.0, 1.0);
+
+  ocol = blackbody(t) * radial * tex * beam * 2.4;
+  oalpha = alpha;
+}
+
+// procedural sky (stars + faint nebula) sampled by escaped ray direction
+vec3 sky(vec3 d){
+  vec3 col = vec3(0.020, 0.024, 0.045);
+
+  // faint galaxy / nebula band
+  float neb = fbm(d * 3.0 + vec3(0.0, 0.0, uTime * 0.004));
+  col += vec3(0.10, 0.08, 0.16) * neb * neb;
+
+  // point stars (cell-based hash)
+  vec3 gp = normalize(d) * 90.0;
+  vec3 idp = floor(gp);
+  vec3 fp = fract(gp) - 0.5;
+  float h = hash31(idp);
+  if (h > 0.9986) {
+    float star = 1.0 - clamp(length(fp) / 0.5, 0.0, 1.0);
+    float b = star * star;
+    vec3 tint = mix(vec3(0.7, 0.75, 1.0), vec3(1.0, 0.85, 0.6), hash31(idp + vec3(5, 0, 0)));
+    col += tint * b * (4.0 + 26.0 * hash31(idp + vec3(0, 9, 0)));
+  }
+  return col;
+}
+
+vec3 tonemap(vec3 c){ return 1.0 - exp(-c * 1.35); }
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
+  vec3 rd = normalize(uFwd + uv.x * uRight * uFov + uv.y * uUp * uFov);
+
+  // --- orbital-plane basis: every photon stays in the plane of (eye, ray) ---
+  vec3 e1 = normalize(uEye);
+  vec3 n  = cross(uEye, rd);
+  float nlen = length(n);
+  vec3 e2;
+  if (nlen > 1e-6) {
+    e2 = normalize(cross(n / nlen, e1));
+  } else {
+    // radial ray: plane is degenerate, pick any perpendicular direction
+    vec3 ref = (abs(e1.x) < 0.9) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    e2 = normalize(cross(e1, ref));
+  }
+
+  // in-plane initial state; conserved E^2 = A(r0) from the null condition
+  float r0 = length(uEye);
+  float rdr = dot(rd, e1);
+  float rdt = dot(rd, e2);
+  float a0 = A(r0);
+  float E2 = a0;
+
+  float r = r0, psi = 0.0;
+  float drdl = sqrt(a0) * rdr;
+  float dpsidl = rdt / r0;
+
+  vec3 prev = uEye;
+  vec3 col = vec3(0.0);
+  float alphaAcc = 0.0;   // accumulated disk opacity along the ray
+  bool done = false;
+
+  for(int i = 0; i < MAXSTEP; i++){
+    // adaptive step: tiny near the hole (strong curvature), large in flat far field
+    float h = clamp(0.02 * r, 0.015, 0.5);
+
+    // RK2 (midpoint) on the in-plane geodesic
+    vec2 a1 = accel2(r, drdl, dpsidl, E2);
+    float rm      = r + drdl * h * 0.5;
+    float drdlm   = drdl + a1.x * h * 0.5;
+    float dpsidlm = dpsidl + a1.y * h * 0.5;
+    vec2 a2 = accel2(rm, drdlm, dpsidlm, E2);
+    float r2      = r + drdlm * h;
+    float psi2    = psi + dpsidlm * h;
+    float drdl2   = drdl + a2.x * h;
+    float dpsidl2 = dpsidl + a2.y * h;
+
+    vec3 pos = r2 * (cos(psi2) * e1 + sin(psi2) * e2);
+
+    // disk plane crossing (z = 0); range widened to cover the wispy outer fade
+    if ((prev.z > 0.0) != (pos.z > 0.0)) {
+      float frac = prev.z / (prev.z - pos.z);
+      vec3 hit = mix(prev, pos, clamp(frac, 0.0, 1.0));
+      float hr = length(hit);
+      if (hr >= RS + 0.05 && hr <= ROUT + RFADE + 2.5) {
+        // reconstruct photon direction at the hit point (in-plane basis)
+        float psih    = mix(psi, psi2, clamp(frac, 0.0, 1.0));
+        float drdlh   = mix(drdl, drdl2, clamp(frac, 0.0, 1.0));
+        float dpsidlh = mix(dpsidl, dpsidl2, clamp(frac, 0.0, 1.0));
+        vec3 er   =  cos(psih) * e1 + sin(psih) * e2;
+        vec3 epsi = -sin(psih) * e1 + cos(psih) * e2;
+        vec3 khat = normalize(er * drdlh + epsi * (hr * dpsidlh));
+        vec3 dcol; float dalpha;
+        diskEmission(hit, khat, hr, dcol, dalpha);
+        // front-to-back alpha compositing (semi-transparent wisps let the sky through)
+        col += (1.0 - alphaAcc) * dcol * dalpha;
+        alphaAcc += (1.0 - alphaAcc) * dalpha;
+        if (alphaAcc > 0.985) { done = true; break; }
+      }
+    }
+
+    // fell through horizon
+    if (r2 < RS || r2 < 1.001) {
+      done = true;
+      break;
+    }
+
+    // escaped -> background, seen through any remaining transparency
+    if (r2 > RESC) {
+      col += (1.0 - alphaAcc) * sky(normalize(pos));
+      done = true;
+      break;
+    }
+
+    prev = pos;
+    r = r2; psi = psi2; drdl = drdl2; dpsidl = dpsidl2;
+  }
+
+  // never resolved: wound around photon sphere -> faint warm halo
+  if (!done) col += (1.0 - alphaAcc) * vec3(0.055, 0.024, 0.010);
+
+  gl_FragColor = vec4(tonemap(col), 1.0);
+}
+</script>
+
+<script id="fsBlur" type="x-shader/x-fragment">
+precision mediump float;
+uniform sampler2D uTex;
+uniform vec2  uDir;   // (1/res.x, 1/res.y) scaled
+varying vec2 vUv;
+
+void main(){
+  vec2 off = uDir;
+  vec3 c = texture2D(uTex, vUv).rgb * 0.227027;
+  c += texture2D(uTex, vUv + off * 1.3836).rgb * 0.316216;
+  c += texture2D(uTex, vUv - off * 1.3836).rgb * 0.316216;
+  c += texture2D(uTex, vUv + off * 3.2304).rgb * 0.070270;
+  c += texture2D(uTex, vUv - off * 3.2304).rgb * 0.070270;
+  gl_FragColor = vec4(c, 1.0);
+}
+</script>
+
+<script id="fsComposite" type="x-shader/x-fragment">
+precision mediump float;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uBloomStrength;
+varying vec2 vUv;
+void main(){
+  vec3 s = texture2D(uScene, vUv).rgb;
+  vec3 b = texture2D(uBloom, vUv).rgb;
+  vec3 c = s + b * uBloomStrength;
+  gl_FragColor = vec4(c, 1.0);
+}
+</script>
+
+<script>
+(function () {
+  const errBox = document.getElementById('err');
+  function fail(msg) {
+    errBox.style.display = 'block';
+    errBox.textContent = 'WebGL error:\n\n' + msg;
+    throw new Error(msg);
+  }
+  try {
+  const canvas = document.getElementById('gl');
+  const gl = canvas.getContext('webgl', { antialias: false, preserveDrawingBuffer: false })
+          || canvas.getContext('experimental-webgl', { antialias: false });
+  if (!gl) { fail('WebGL context could not be created. Your browser/GPU may not support WebGL.'); return; }
+
+  function compile(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(sh));
+    }
+    return sh;
+  }
+  function program(vsSrc, fsSrc) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(p));
+    }
+    return p;
+  }
+
+  const vsQuad = document.getElementById('vsQuad').textContent;
+  const progScene = program(vsQuad, document.getElementById('fsScene').textContent);
+  const progBlur  = program(vsQuad, document.getElementById('fsBlur').textContent);
+  const progComp  = program(vsQuad, document.getElementById('fsComposite').textContent);
+
+  // fullscreen triangle
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+  function quad(p) {
+    const loc = gl.getAttribLocation(p, 'aPos');
+    gl.enableVertexAttribArray(loc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function makeTarget(w, h) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fbo, w, h };
+  }
+
+  let sceneT = null, blurA = null, blurB = null, W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0;
+  let quality = 0.7; // internal raymarch resolution scale (keys 1/2/3 switch)
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    W = canvas.width  = Math.max(2, Math.floor(canvas.clientWidth  * dpr));
+    H = canvas.height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+    SW = Math.max(2, Math.floor(W * quality));
+    SH = Math.max(2, Math.floor(H * quality));
+    BW = Math.max(2, SW >> 1);
+    BH = Math.max(2, SH >> 1);
+    sceneT = makeTarget(SW, SH);
+    blurA = makeTarget(BW, BH);
+    blurB = makeTarget(BW, BH);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  window.addEventListener('keydown', e => {
+    if (e.key === '1') { quality = 0.5; resize(); }
+    if (e.key === '2') { quality = 0.7; resize(); }
+    if (e.key === '3') { quality = 1.0; resize(); }
+  });
+
+  // camera
+  let yaw = 0.7, pitch = 0.38, dist = 13.0;
+  const spin = 1.0;
+  const FOV = Math.tan(1.05 / 2);
+
+  function cameraVectors() {
+    const cp = Math.cos(pitch), sp = Math.sin(pitch);
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const eye = [
+      dist * cp * cy,
+      dist * cp * sy,
+      dist * sp
+    ];
+    // lookAt basis: camera at `eye` looking at origin, world-up = +Z
+    const fwd = [-cp * cy, -cp * sy, -sp];       // toward target (origin)
+    const right = [-sy, cy, 0];                  // normalize(cross(worldUp, -fwd))
+    const up = [-sp * cy, -sp * sy, cp];         // cross(-fwd, right)
+    return { eye, fwd, right, up };
+  }
+
+  let dragging = false, lx = 0, ly = 0;
+
+  canvas.addEventListener('pointerdown', e => {
+    dragging = true;
+    lx = e.clientX; ly = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    yaw   -= dx * 0.005;
+    pitch -= dy * 0.005;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch));
+  });
+  canvas.addEventListener('pointerup', e => { dragging = false; });
+  canvas.addEventListener('pointercancel', () => { dragging = false; });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    dist *= Math.exp(e.deltaY * 0.0012);
+    dist = Math.max(3.5, Math.min(45.0, dist));
+  }, { passive: false });
+  canvas.addEventListener('dblclick', () => { yaw = 0.7; pitch = 0.38; dist = 13.0; });
+
+  const start = performance.now();
+  let lastT = start, fpsAcc = 0, fpsN = 0, fpsShown = 0;
+  const hud = document.getElementById('hud');
+
+  function render(now) {
+    const time = (now - start) / 1000;
+    const dt = Math.min((now - lastT) / 1000, 0.1);
+    lastT = now;
+    if (!dragging) yaw += 0.03 * dt; // gentle auto-orbit (time-based)
+
+    // fps readout (updated ~2x/sec)
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc >= 0.5) {
+      fpsShown = Math.round(fpsN / fpsAcc);
+      fpsAcc = 0; fpsN = 0;
+      hud.innerHTML = '<b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset · <b>1/2/3</b> quality<br>'
+                    + fpsShown + ' fps · ' + SW + '×' + SH + ' render';
+    }
+
+    const cam = cameraVectors();
+
+    // ---- scene pass (internal resolution) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneT.fbo);
+    gl.viewport(0, 0, SW, SH);
+    gl.useProgram(progScene);
+    gl.uniform2f(gl.getUniformLocation(progScene, 'uRes'), SW, SH);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uTime'), time);
+    gl.uniform3fv(gl.getUniformLocation(progScene, 'uEye'), cam.eye);
+    gl.uniform3fv(gl.getUniformLocation(progScene, 'uFwd'), cam.fwd);
+    gl.uniform3fv(gl.getUniformLocation(progScene, 'uRight'), cam.right);
+    gl.uniform3fv(gl.getUniformLocation(progScene, 'uUp'), cam.up);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uFov'), FOV);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uSpin'), spin);
+    quad(progScene);
+
+    // ---- bloom at half internal res: horizontal then vertical blur ----
+    gl.useProgram(progBlur);
+    const uTex = gl.getUniformLocation(progBlur, 'uTex');
+    const uDir = gl.getUniformLocation(progBlur, 'uDir');
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurA.fbo);
+    gl.viewport(0, 0, BW, BH);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+    gl.uniform1i(uTex, 0);
+    gl.uniform2f(uDir, 1.0 / BW, 0.0);
+    quad(progBlur);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, blurA.tex);
+    gl.uniform2f(uDir, 0.0, 1.0 / BH);
+    quad(progBlur);
+
+    // ---- composite to screen (upscale) ----
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(progComp);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+    gl.uniform1i(gl.getUniformLocation(progComp, 'uScene'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, blurB.tex);
+    gl.uniform1i(gl.getUniformLocation(progComp, 'uBloom'), 1);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uBloomStrength'), 0.85);
+    quad(progComp);
+
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+  } catch (e) {
+    fail(e && e.message ? e.message : String(e));
+  }
+})();
+</script>
+</body>
+</html>
