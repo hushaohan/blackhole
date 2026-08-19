@@ -207,24 +207,57 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   oalpha = alpha;
 }
 
-// procedural sky (stars + faint nebula) sampled by escaped ray direction
-vec3 sky(vec3 d){
+// procedural sky (stars + faint nebula) sampled at the ray's escape point
+vec3 sky(vec3 escPos){
+  vec3 d = normalize(escPos);
   vec3 col = vec3(0.020, 0.024, 0.045);
 
-  // faint galaxy / nebula band
+  // faint galaxy / nebula band (direction-only: stays at infinity)
   float neb = fbm(d * 3.0 + vec3(0.0, 0.0, uTime * 0.004));
-  col += vec3(0.10, 0.08, 0.16) * neb * neb;
+  col += vec3(0.17, 0.13, 0.26) * neb * neb;
 
-  // point stars (cell-based hash)
-  vec3 gp = normalize(d) * 90.0;
-  vec3 idp = floor(gp);
-  vec3 fp = fract(gp) - 0.5;
-  float h = hash31(idp);
-  if (h > 0.9986) {
-    float star = 1.0 - clamp(length(fp) / 0.5, 0.0, 1.0);
-    float b = star * star;
-    vec3 tint = mix(vec3(0.7, 0.75, 1.0), vec3(1.0, 0.85, 0.6), hash31(idp + vec3(5, 0, 0)));
-    col += tint * b * (4.0 + 26.0 * hash31(idp + vec3(0, 9, 0)));
+  // point stars on three depth layers. Stars are anchored in WORLD space on
+  // spherical shells around the hole (radii 120/190/260 — well outside the
+  // disk): each ray is intersected with its shell and the hash grid is
+  // evaluated at that fixed world point. Because star positions don't depend
+  // on the camera, orbiting and zooming only shift their apparent position
+  // smoothly (true parallax — near shells slide against far ones) instead of
+  // re-rolling the hash and making stars pop in/out.
+  //
+  // Each shell rotates rigidly at its Keplerian angular velocity
+  // w = sqrt(0.5/R^3), so the inner shell drifts ~3x faster than the outer
+  // ones (differential rotation). The pattern is static in the co-rotating
+  // frame, so it simply spins as a rigid field — no popping — and the
+  // scaling is physically motivated: anything bound this close to the hole
+  // must orbit fast or it would have fallen in. (Inner shell laps in ~3 h,
+  // but its ~2 deg/min drift is visible within minutes.)
+  // Per-layer spawn probability scales ~1/R^2 so all shells contribute
+  // roughly equal angular star density, and the sprite radius is a fixed
+  // world size, so near stars look bigger and far ones shrink to pinpoints.
+  vec3 dc = normalize(escPos - uEye);   // ray direction as seen from camera
+  float eyeR2 = dot(uEye, uEye);
+  for (int i = 0; i < 3; i++) {
+    float R = 120.0 + float(i) * 70.0;            // world-space shell radius
+    // ray-sphere intersection; camera (dist <= 45) is always inside, so the
+    // forward hit always exists
+    float b = dot(uEye, dc);
+    float t = -b + sqrt(max(0.0, b * b - eyeR2 + R * R));
+    vec3 gp = uEye + dc * t;                      // fixed world point on shell
+    // Keplerian rotation of the star field on this shell
+    float w = sqrt(0.5 / (R * R * R)) * uTime;
+    float cw = cos(w), sw = sin(w);
+    gp = vec3(cw * gp.x + sw * gp.y, -sw * gp.x + cw * gp.y, gp.z);
+    vec3 idp = floor(gp);
+    vec3 fp = fract(gp) - 0.5;
+    float h = hash31(idp + float(i) * 17.13);
+    float thr = 1.0 - 110.0 / (R * R);            // equal angular density
+    if (h > thr) {
+      float star = 1.0 - clamp(length(fp) / 0.13, 0.0, 1.0);
+      float b2 = star * star;                     // tiny, sharp pinpoints
+      vec3 tint = mix(vec3(0.7, 0.75, 1.0), vec3(1.0, 0.85, 0.6), hash31(idp + vec3(5, 0, 0)));
+      float lum = (4.0 + 22.0 * hash31(idp + vec3(0, 9, 0))) * (120.0 / R);
+      col += tint * b2 * lum;
+    }
   }
   return col;
 }
@@ -311,7 +344,7 @@ void main(){
 
     // escaped -> background, seen through any remaining transparency
     if (r2 > RESC) {
-      col += (1.0 - alphaAcc) * sky(normalize(pos));
+      col += (1.0 - alphaAcc) * sky(pos);
       done = true;
       break;
     }
@@ -447,12 +480,20 @@ void main(){
   let sceneT = null, blurA = null, blurB = null, qA = null, qB = null,
       W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0, QW = 0, QH = 0;
 
-  function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    W = canvas.width  = Math.max(2, Math.floor(canvas.clientWidth  * dpr));
-    H = canvas.height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
-    SW = W;
-    SH = H;
+  // --- adaptive render quality -------------------------------------------
+  // The canvas backing store stays at full (capped-DPR) resolution; only the
+  // internal scene/bloom targets scale. `quality` multiplies that base res:
+  // a controller aiming for 60 fps steps it down quickly when frames run
+  // long and back up slowly (only after sustained headroom), with a cooldown
+  // between changes so it can't oscillate. The composite pass upscales the
+  // scene target with linear filtering.
+  const DPR_CAP = 2.0;
+  const Q_MIN = 0.45, Q_MAX = 1.0;
+  let quality = 1.0;
+
+  function rebuildTargets() {
+    SW = Math.max(2, Math.floor(W * quality));
+    SH = Math.max(2, Math.floor(H * quality));
     BW = Math.max(2, SW >> 1);
     BH = Math.max(2, SH >> 1);
     QW = Math.max(2, BW >> 1);
@@ -463,11 +504,18 @@ void main(){
     qA = makeTarget(QW, QH);
     qB = makeTarget(QW, QH);
   }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+    W = canvas.width  = Math.max(2, Math.floor(canvas.clientWidth  * dpr));
+    H = canvas.height = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+    rebuildTargets();
+  }
   window.addEventListener('resize', resize);
   resize();
 
   // camera
-  let yaw = 0.7, pitch = 0.38, dist = 13.0;
+  let yaw = 0.7, pitch = 0.04, dist = 13.0;
   const spin = 1.0;
   const FOV = Math.tan(1.05 / 2);
 
@@ -510,7 +558,7 @@ void main(){
       const dx = e.clientX - p.x, dy = e.clientY - p.y;
       p.x = e.clientX; p.y = e.clientY;
       yaw      -= dx * 0.005;
-      pitch    -= dy * 0.005;
+      pitch    += dy * 0.005;   // vertical drag direction flipped
       pitch = Math.max(-1.45, Math.min(1.45, pitch));
       } else {
         // two or more fingers: pinch to zoom (spreading apart = zoom in)
@@ -534,11 +582,39 @@ void main(){
     dist *= Math.exp(e.deltaY * 0.0012);
     dist = Math.max(3.5, Math.min(45.0, dist));
   }, { passive: false });
-  canvas.addEventListener('dblclick', () => { yaw = 0.7; pitch = 0.38; dist = 13.0; });
+  canvas.addEventListener('dblclick', () => { yaw = 0.7; pitch = 0.04; dist = 13.0; });
 
   const start = performance.now();
   let lastT = start, fpsAcc = 0, fpsN = 0, fpsShown = 0;
   const hud = document.getElementById('hud');
+
+  // --- adaptive quality controller (targets 60 fps) ---
+  const FPS_TARGET = 30;
+  let qCooldown = 0;      // seconds until the next quality change is allowed
+  let qGoodTime = 0;      // seconds of sustained headroom (for stepping UP)
+
+  function adaptQuality(dt, fps) {
+    qCooldown = Math.max(0, qCooldown - dt);
+    if (qCooldown > 0) return;
+
+    if (fps < FPS_TARGET - 4) {
+      // running slow: step down fast (proportional to the shortfall)
+      const step = fps < FPS_TARGET * 0.6 ? 0.20 : 0.10;
+      quality = Math.max(Q_MIN, quality - step);
+      rebuildTargets();
+      qCooldown = 1.0; qGoodTime = 0;
+    } else if (fps > FPS_TARGET + 2 && quality < Q_MAX) {
+      // sustained headroom: step back up slowly, one notch at a time
+      qGoodTime += dt;
+      if (qGoodTime >= 2.0) {
+        quality = Math.min(Q_MAX, quality + 0.08);
+        rebuildTargets();
+        qCooldown = 1.5; qGoodTime = 0;
+      }
+    } else {
+      qGoodTime = 0;
+    }
+  }
 
   function render(now) {
     const time = (now - start) / 1000;
@@ -546,13 +622,14 @@ void main(){
     lastT = now;
     if (!dragging) yaw += 0.03 * dt; // gentle auto-orbit (time-based)
 
-    // fps readout (updated ~2x/sec)
+    // fps readout + adaptive quality (updated ~2x/sec)
     fpsAcc += dt; fpsN++;
     if (fpsAcc >= 0.5) {
       fpsShown = Math.round(fpsN / fpsAcc);
+      adaptQuality(fpsAcc, fpsShown);
       fpsAcc = 0; fpsN = 0;
       hud.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset<br>'
-                    + fpsShown + ' fps · ' + SW + '×' + SH + ' render';
+                    + fpsShown + ' fps · ' + SW + '×' + SH + ' render · q ' + Math.round(quality * 100) + '%';
     }
 
     const cam = cameraVectors();
