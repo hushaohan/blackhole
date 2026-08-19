@@ -15,6 +15,18 @@
     text-shadow: 0 1px 3px rgba(0,0,0,0.8);
   }
   #hud b { color: #ffd8a0; }
+  #hud .fpsrow { margin-top: 2px; opacity: 0.55; }
+  #hud .fpsbtn {
+    font: inherit; color: rgba(255,255,255,0.75);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+    min-width: 30px; min-height: 26px; padding: 0 6px; margin: 0 4px;
+    cursor: pointer; pointer-events: auto;
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+    user-select: none; vertical-align: middle;
+  }
+  #hud .fpsbtn:hover { background: rgba(255,255,255,0.12); }
+  #hud .fpsbtn:active { background: rgba(255,255,255,0.20); }
   #err {
     position: fixed; inset: 0; display: none;
     padding: 40px; color: #ff8080;
@@ -27,7 +39,12 @@
 <canvas id="gl"></canvas>
 <div id="err"></div>
 <div id="hud">
-  <b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset
+  <span id="hudText"><b>drag</b> orbit · <b>scroll</b> zoom · <b>dbl-click</b> reset</span>
+  <div class="fpsrow">
+    <button class="fpsbtn" id="fpsDown" aria-label="Lower target fps by 5">−5</button>
+    <span id="fpsTgt">30</span> fps target
+    <button class="fpsbtn" id="fpsUp" aria-label="Raise target fps by 5">+5</button>
+  </div>
 </div>
 
 <script id="vsQuad" type="x-shader/x-vertex">
@@ -586,24 +603,35 @@ void main(){
 
   const start = performance.now();
   let lastT = start, fpsAcc = 0, fpsN = 0, fpsShown = 0;
-  const hud = document.getElementById('hud');
+  const hudText = document.getElementById('hudText');
+  const fpsTgtEl = document.getElementById('fpsTgt');
 
-  // --- adaptive quality controller (targets 60 fps) ---
-  const FPS_TARGET = 30;
+  // --- adaptive quality controller (targets fpsTarget) ---
+  let fpsTarget = 30;
   let qCooldown = 0;      // seconds until the next quality change is allowed
   let qGoodTime = 0;      // seconds of sustained headroom (for stepping UP)
+
+  // -5 / +5 buttons next to the HUD: adjust the fps target (10..120).
+  // Reset the controller timers so it reacts immediately to the new target.
+  function bumpTarget(d) {
+    fpsTarget = Math.max(10, Math.min(120, fpsTarget + d));
+    fpsTgtEl.textContent = fpsTarget;
+    qCooldown = 0; qGoodTime = 0;
+  }
+  document.getElementById('fpsDown').addEventListener('click', () => bumpTarget(-5));
+  document.getElementById('fpsUp').addEventListener('click', () => bumpTarget(5));
 
   function adaptQuality(dt, fps) {
     qCooldown = Math.max(0, qCooldown - dt);
     if (qCooldown > 0) return;
 
-    if (fps < FPS_TARGET - 4) {
+    if (fps < fpsTarget - 4) {
       // running slow: step down fast (proportional to the shortfall)
-      const step = fps < FPS_TARGET * 0.6 ? 0.20 : 0.10;
+      const step = fps < fpsTarget * 0.6 ? 0.20 : 0.10;
       quality = Math.max(Q_MIN, quality - step);
       rebuildTargets();
       qCooldown = 1.0; qGoodTime = 0;
-    } else if (fps > FPS_TARGET + 2 && quality < Q_MAX) {
+    } else if (fps > fpsTarget + 2 && quality < Q_MAX) {
       // sustained headroom: step back up slowly, one notch at a time
       qGoodTime += dt;
       if (qGoodTime >= 2.0) {
@@ -628,7 +656,7 @@ void main(){
       fpsShown = Math.round(fpsN / fpsAcc);
       adaptQuality(fpsAcc, fpsShown);
       fpsAcc = 0; fpsN = 0;
-      hud.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset<br>'
+      hudText.innerHTML = '<b>drag</b> orbit · ' + (coarse ? '<b>pinch</b>' : '<b>scroll</b>') + ' zoom · <b>dbl-click</b> reset<br>'
                     + fpsShown + ' fps · ' + SW + '×' + SH + ' render · q ' + Math.round(quality * 100) + '%';
     }
 
