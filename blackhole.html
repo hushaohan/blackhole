@@ -250,7 +250,7 @@ vec3 sky(vec3 escPos){
     vec3 idp = floor(gp);
     vec3 fp = fract(gp) - 0.5;
     float h = hash31(idp + float(i) * 17.13);
-    float thr = 1.0 - 110.0 / (R * R);            // equal angular density
+    float thr = 1.0 - 1100.0 / (R * R);           // equal angular density
     if (h > thr) {
       float star = 1.0 - clamp(length(fp) / 0.13, 0.0, 1.0);
       float b2 = star * star;                     // tiny, sharp pinpoints
