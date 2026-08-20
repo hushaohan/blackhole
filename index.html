@@ -75,7 +75,7 @@ uniform float uSpin;    // +1 / -1 disk rotation sense
 const float RS     = 1.0;   // Schwarzschild radius (units of rs)
 const float RIN    = 3.0;   // disk inner radius (ISCO-ish)
 const float ROUT   = 9.0;   // disk outer radius (nominal; edge fades beyond this)
-const float RFADE  = 3.5;   // width of the wispy, semi-transparent outer fade
+const float RFADE  = 2.2;   // width of the wispy, semi-transparent outer fade
 const float RESC   = 45.0;  // escape radius -> sample sky
 const int  MAXSTEP = 1200;
 
@@ -117,13 +117,14 @@ vec2 accel2(float r, float drdl, float dpsidl, float E2){
   return vec2(rdd, psidd);
 }
 
-// blackbody-ish temperature ramp: 0 = cool red, 1 = hot blue-white
-vec3 blackbody(float t){
+// Gargantua palette: ember -> amber -> gold -> warm white. The film disk is
+// a near-uniform golden glow, so the ramp deliberately never goes blue.
+vec3 diskColor(float t){
   t = clamp(t, 0.0, 1.0);
-  vec3 c = vec3(1.00, 0.25, 0.055);
-  c = mix(c, vec3(1.00, 0.62, 0.18), smoothstep(0.0, 0.45, t));
-  c = mix(c, vec3(1.00, 0.90, 0.62), smoothstep(0.45, 0.78, t));
-  c = mix(c, vec3(0.82, 0.93, 1.00), smoothstep(0.78, 1.0, t));
+  vec3 c = vec3(0.45, 0.12, 0.03);
+  c = mix(c, vec3(0.95, 0.45, 0.12), smoothstep(0.0, 0.40, t));
+  c = mix(c, vec3(1.00, 0.78, 0.42), smoothstep(0.40, 0.75, t));
+  c = mix(c, vec3(1.00, 0.96, 0.86), smoothstep(0.75, 1.0, t));
   return c;
 }
 
@@ -147,8 +148,10 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
   float t = pow(clamp(RIN / r, 0.0, 1.0), 0.75);
 
-  // Doppler beaming: approaching side boosted, receding side dimmed
-  float beam = pow(clamp(g, 0.0, 3.0), 3.0);
+  // Doppler beaming strongly suppressed for the Interstellar look: Nolan's
+  // team removed the frequency shift, leaving only a hint of the brightness
+  // asymmetry (approaching side subtly brighter, no blue blaze).
+  float beam = mix(1.0, pow(clamp(g, 0.0, 3.0), 3.0), 0.18);
 
   // --- radial structure (physically motivated) ---
   // brightness peaks at the ISCO, decays outward (Novikov-Thorne-like),
@@ -157,7 +160,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // Blend the two decay regimes across the ISCO (C1-continuous), so brightness
   // still peaks exactly at r = RIN but no hard ring appears there.
   float radialIn  = 1.9 * exp(-(1.0 - x) * 2.5) * smoothstep(RS, RS + 0.8, r);
-  float radialOut = 1.9 * exp(-(x - 1.0) * 0.95);
+  float radialOut = 1.9 * exp(-(x - 1.0) * 1.25);
   float radial    = mix(radialIn, radialOut, smoothstep(0.75, 1.25, x));
   float innerAlpha = smoothstep(RS, RS + 1.2, r);   // optically thin near the horizon
 
@@ -192,9 +195,9 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // generation A: born at the epoch start, rotated by age*omega since birth
   float arA = an - age * omega * spinMul * uSpin;
   vec2 rpA = r * vec2(cos(arA), sin(arA));
-  float w1A = fbm(vec3(rpA * 1.4, seedA + 3.1));
-  float w2A = fbm(vec3(rpA * 1.4 + vec2(5.2, 1.3), seedA + 7.7));
-  float dust = fbm(vec3(rpA * 2.0 + 1.6 * vec2(w1A, w2A), seedA + 1.9));
+  float w1A = fbm(vec3(rpA * 1.8, seedA + 3.1));
+  float w2A = fbm(vec3(rpA * 1.8 + vec2(5.2, 1.3), seedA + 7.7));
+  float dust = fbm(vec3(rpA * 2.6 + 2.6 * vec2(w1A, w2A), seedA + 1.9));
 
   // crossfade into generation B over the last 35% of the epoch.
   // (u depends only on uTime, so this branch is uniform across all pixels.)
@@ -202,17 +205,17 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
     float ageB = age - TGEN;   // B isn't born yet: negative age = pre-rotation
     float arB = an - ageB * omega * spinMul * uSpin;
     vec2 rpB = r * vec2(cos(arB), sin(arB));
-    float w1B = fbm(vec3(rpB * 1.4, seedB + 3.1));
-    float w2B = fbm(vec3(rpB * 1.4 + vec2(5.2, 1.3), seedB + 7.7));
-    float dustB = fbm(vec3(rpB * 2.0 + 1.6 * vec2(w1B, w2B), seedB + 1.9));
+    float w1B = fbm(vec3(rpB * 1.8, seedB + 3.1));
+    float w2B = fbm(vec3(rpB * 1.8 + vec2(5.2, 1.3), seedB + 7.7));
+    float dustB = fbm(vec3(rpB * 2.6 + 2.6 * vec2(w1B, w2B), seedB + 1.9));
     dust = mix(dust, dustB, smoothstep(0.65, 1.0, u));
   }
 
-  // contrasty dust: dense clumps bright, thin lanes dark
-  float tex = 0.35 + 1.35 * smoothstep(0.25, 0.85, dust);
+  // contrasty, filamentary dust: bright sheared threads, dark narrow lanes
+  float tex = 0.18 + 1.65 * smoothstep(0.30, 0.82, dust);
 
-  // --- wispy outer edge: noise-wobbled boundary fading to transparent ---
-  float edge = ROUT + (dust - 0.5) * 2.5;           // ragged, rotating boundary
+  // --- crisper outer edge: less wobble, narrower transparent fade ---
+  float edge = ROUT + (dust - 0.5) * 1.6;           // ragged, rotating boundary
   float fade = 1.0 - smoothstep(edge, edge + RFADE, r);
   // patchy wisps inside the disk that solidify smoothly by the nominal outer
   // radius, so opacity never snaps at exactly r = ROUT
@@ -220,7 +223,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
                    smoothstep(ROUT - 2.5, ROUT, r));
   float alpha = clamp(fade * wisp * innerAlpha, 0.0, 1.0);
 
-  ocol = blackbody(t) * radial * tex * beam * 2.4;
+  ocol = diskColor(t) * radial * tex * beam * 2.4;
   oalpha = alpha;
 }
 
@@ -353,6 +356,31 @@ void main(){
       }
     }
 
+    // --- volumetric haze: visible disk thickness ---
+    // A tenuous glow above/below the midplane with a noise-driven irregular
+    // scale height, co-rotating with the disk, so it reads as a slightly
+    // puffy slab rather than a mathematical plane. Purely emissive (adds no
+    // opacity), so it never hides the lensed images behind it.
+    {
+      float cylR = length(pos.xy);
+      if (cylR >= RS + 0.05 && cylR <= ROUT + 2.0 && abs(pos.z) < 1.8) {
+        float anH = atan(pos.y, pos.x);
+        float omH = sqrt(0.5 / (cylR * cylR * cylR)) * 2.0 * uSpin;
+        float arH = anH - uTime * omH;
+        vec2 rpH = cylR * vec2(cos(arH), sin(arH));
+        vec3 q = vec3(rpH * 0.9, 41.7);
+        float puff = noise3(q) * 0.65 + noise3(q * 2.03 + 7.3) * 0.35;
+        float Hsc = 0.20 + 0.60 * puff;             // irregular scale height
+        float vert = exp(-(pos.z * pos.z) / (Hsc * Hsc));
+        float xh = cylR / RIN;
+        float env = exp(-max(xh - 1.0, 0.0) * 1.1)
+                  * smoothstep(RS, RS + 0.9, cylR)
+                  * (1.0 - smoothstep(ROUT - 1.0, ROUT + 2.0, cylR));
+        float hz = vert * env * (0.30 + 0.95 * smoothstep(0.35, 0.85, puff));
+        col += (1.0 - alphaAcc) * diskColor(pow(clamp(RIN / cylR, 0.0, 1.0), 0.75)) * hz * h * 0.12;
+      }
+    }
+
     // fell through horizon
     if (r2 <= RS + 0.05) {
       done = true;
@@ -370,8 +398,8 @@ void main(){
     r = r2; psi = psi2; drdl = drdl2; dpsidl = dpsidl2;
   }
 
-  // never resolved: wound around photon sphere -> faint warm halo
-  if (!done) col += (1.0 - alphaAcc) * vec3(0.055, 0.024, 0.010);
+  // never resolved: wound around photon sphere -> boosted warm photon ring
+  if (!done) col += (1.0 - alphaAcc) * vec3(0.28, 0.15, 0.055);
 
   gl_FragColor = vec4(tonemap(col), 1.0);
 }
@@ -412,14 +440,37 @@ precision mediump float;
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
 uniform sampler2D uBloomWide;
+uniform sampler2D uFlare;
 uniform float uStrength;        // narrow   (half-res)   bloom weight
 uniform float uStrengthWide;    // wide     (quarter-res) bloom weight
+uniform float uStrengthFlare;   // anamorphic horizontal streak weight
+uniform vec2  uRes;
+uniform float uTime;
 varying vec2 vUv;
+
+float hash21(vec2 p){
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main(){
   vec3 s     = texture2D(uScene, vUv).rgb;
   vec3 b     = texture2D(uBloom, vUv).rgb;
   vec3 bw    = texture2D(uBloomWide, vUv).rgb;
-  vec3 c = s + b * uStrength + bw * uStrengthWide;
+  vec3 fl    = texture2D(uFlare, vUv).rgb;
+  vec3 c = s + b * uStrength + bw * uStrengthWide + fl * uStrengthFlare;
+
+  // --- cinematic grade ---
+  // gentle shadow desaturation (film stocks lose chroma in the darks)
+  float lum = dot(c, vec3(0.299, 0.587, 0.114));
+  c = mix(vec3(lum), c, mix(0.82, 1.0, smoothstep(0.0, 0.35, lum)));
+  // vignette
+  vec2 vq = (vUv - 0.5) * vec2(uRes.x / uRes.y, 1.0);
+  float vig = smoothstep(1.35, 0.45, length(vq));
+  c *= mix(0.72, 1.0, vig);
+  // animated film grain (strongest in the shadows, ~invisible in highlights)
+  float gr = hash21(gl_FragCoord.xy + vec2(fract(uTime * 13.7) * 61.0, fract(uTime * 7.3) * 47.0));
+  c += (gr - 0.5) * 0.045 * (1.0 - clamp(lum, 0.0, 1.0));
+
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 </script>
@@ -495,6 +546,7 @@ void main(){
   const coarse = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
                  || (navigator.maxTouchPointers || 0) > 0;
   let sceneT = null, blurA = null, blurB = null, qA = null, qB = null,
+      fA = null, fB = null,
       W = 0, H = 0, SW = 0, SH = 0, BW = 0, BH = 0, QW = 0, QH = 0;
 
   // --- adaptive render quality -------------------------------------------
@@ -520,6 +572,8 @@ void main(){
     blurB = makeTarget(BW, BH);
     qA = makeTarget(QW, QH);
     qB = makeTarget(QW, QH);
+    fA = makeTarget(QW, QH);
+    fB = makeTarget(QW, QH);
   }
 
   function resize() {
@@ -711,6 +765,22 @@ void main(){
     gl.uniform2f(uDir, 0.0, 1.0 / QH);
     quad(progBlur);
 
+    // ---- anamorphic flare: bright-pass, then smear horizontally only ----
+    // two passes with growing reach give a subtle 65mm-lens streak across
+    // the brightest highlights (no vertical component)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fA.fbo);
+    gl.viewport(0, 0, QW, QH);
+    gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
+    gl.uniform1f(uThresh, 0.8);
+    gl.uniform2f(uDir, 2.0 / QW, 0.0);
+    quad(progBlur);
+
+    gl.uniform1f(uThresh, 0.0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fB.fbo);
+    gl.bindTexture(gl.TEXTURE_2D, fA.tex);
+    gl.uniform2f(uDir, 9.0 / QW, 0.0);
+    quad(progBlur);
+
     // ---- composite to screen (upscale) ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
@@ -724,8 +794,14 @@ void main(){
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, qB.tex);
     gl.uniform1i(gl.getUniformLocation(progComp, 'uBloomWide'), 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, fB.tex);
+    gl.uniform1i(gl.getUniformLocation(progComp, 'uFlare'), 3);
     gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.5);
     gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.9);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthFlare'), 0.45);
+    gl.uniform2f(gl.getUniformLocation(progComp, 'uRes'), W, H);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uTime'), time);
     quad(progComp);
 
     requestAnimationFrame(render);
