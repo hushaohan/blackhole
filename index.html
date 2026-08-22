@@ -439,7 +439,7 @@ void main(){
       // already <1% — one exp instead of three noise octaves. Together these
       // remove most of the haze cost, which dominates edge-on views.
       if (cylR >= RS + 0.05 && cylR <= ROUT + 2.0
-          && ((i & 1) == 0)
+          && mod(float(i), 2.0) < 0.5)   // every other step (ES 1.00: no bit ops)
           && exp(-pos.z * pos.z / 0.64) > 0.010) {
         float anH = atan(pos.y, pos.x);
         float omH = sqrt(0.5 / (cylR * cylR * cylR)) * 2.0 * uSpin;
