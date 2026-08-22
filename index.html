@@ -145,13 +145,20 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   float gGrav = sqrt(A(r));                          // gravitational redshift
   float g = gDop * gGrav;
 
-  // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
-  float t = pow(clamp(RIN / r, 0.0, 1.0), 0.75);
+  // Doppler beaming kept but HARD-BOUNDED for the Interstellar look: the old
+  // pow(g,3) term reached ~2.3-5.7x, clipping the approaching half of the
+  // disk to pure white (the "glare"). A linear blend of g stays expressive
+  // yet strictly capped, so the left/right asymmetry survives without ever
+  // saturating the plasma.
+  float beam = clamp(mix(1.0, g, 0.50), 0.70, 1.52);
 
-  // Doppler beaming strongly suppressed for the Interstellar look: Nolan's
-  // team removed the frequency shift, leaving only a hint of the brightness
-  // asymmetry (approaching side subtly brighter, no blue blaze).
-  float beam = mix(1.0, pow(clamp(g, 0.0, 3.0), 3.0), 0.18);
+  // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
+  // relativistic hue shift INSIDE the amber family: Doppler-boosted plasma
+  // reads hotter (toward white-hot gold), receding plasma reads cooler
+  // (deeper ember/copper) — the same physics the film's color story implies,
+  // expressed as temperature instead of raw brightness. Never blue.
+  float gT = clamp(pow(g, 0.55), 0.62, 1.30);
+  float t = pow(clamp(RIN / r, 0.0, 1.0), 0.75) * gT;
 
   // --- radial structure (physically motivated) ---
   // brightness peaks at the ISCO, decays outward (Novikov-Thorne-like),
@@ -236,6 +243,13 @@ vec3 sky(vec3 escPos){
   float neb = fbm(d * 3.0 + vec3(0.0, 0.0, uTime * 0.004));
   col += vec3(0.17, 0.13, 0.26) * neb * neb;
 
+  // Milky Way band: a great circle of denser, fainter stars and brighter
+  // nebulosity, tilted well away from the disk plane so it crosses the sky
+  // diagonally behind the hole (the film's backdrop structure)
+  float bd = dot(d, normalize(vec3(0.28, 0.82, 0.50)));
+  float band = exp(-bd * bd * 14.0);
+  col += vec3(0.105, 0.098, 0.135) * band * band * (0.35 + 0.65 * neb * neb);
+
   // point stars on three depth layers. Stars are anchored in WORLD space on
   // spherical shells around the hole (radii 120/190/260 — well outside the
   // disk): each ray is intersected with its shell and the hash grid is
@@ -263,6 +277,10 @@ vec3 sky(vec3 escPos){
     float b = dot(uEye, dc);
     float t = -b + sqrt(max(0.0, b * b - eyeR2 + R * R));
     vec3 gp = uEye + dc * t;                      // fixed world point on shell
+    // Milky Way overdensity, evaluated BEFORE the shell rotation so the band
+    // itself is static in world space while the stars drift through it
+    float bdS = dot(gp / R, normalize(vec3(0.28, 0.82, 0.50)));
+    float bandS = exp(-bdS * bdS * 14.0);
     // Keplerian rotation of the star field on this shell
     float w = sqrt(0.5 / (R * R * R)) * uTime;
     float cw = cos(w), sw = sin(w);
@@ -270,12 +288,16 @@ vec3 sky(vec3 escPos){
     vec3 idp = floor(gp);
     vec3 fp = fract(gp) - 0.5;
     float h = hash31(idp + float(i) * 17.13);
-    float thr = 1.0 - 1100.0 / (R * R);           // equal angular density
+    // equal angular density base; ~3x denser inside the Milky Way band
+    float thr = 1.0 - (1100.0 / (R * R)) * (1.0 + 2.2 * bandS);
     if (h > thr) {
       float star = 1.0 - clamp(length(fp) / 0.13, 0.0, 1.0);
       float b2 = star * star;                     // tiny, sharp pinpoints
       vec3 tint = mix(vec3(0.7, 0.75, 1.0), vec3(1.0, 0.85, 0.6), hash31(idp + vec3(5, 0, 0)));
-      float lum = (4.0 + 22.0 * hash31(idp + vec3(0, 9, 0))) * (120.0 / R);
+      // band crowd is fainter per-star, so it reads as a milky river of
+      // resolved points rather than a brighter stripe
+      float lum = (4.0 + 22.0 * hash31(idp + vec3(0, 9, 0))) * (120.0 / R)
+                * (1.0 - 0.40 * bandS);
       col += tint * b2 * lum;
     }
   }
@@ -368,8 +390,13 @@ void main(){
         float omH = sqrt(0.5 / (cylR * cylR * cylR)) * 2.0 * uSpin;
         float arH = anH - uTime * omH;
         vec2 rpH = cylR * vec2(cos(arH), sin(arH));
-        vec3 q = vec3(rpH * 0.9, 41.7);
-        float puff = noise3(q) * 0.65 + noise3(q * 2.03 + 7.3) * 0.35;
+        // structured haze: the third octave plus a height-dependent noise
+        // coordinate stratify the puffs into wispy layers, so the disk's
+        // thickness shows internal structure instead of reading as flat fog
+        vec3 q = vec3(rpH * 0.9, pos.z * 1.6 + 41.7);
+        float puff = noise3(q) * 0.55
+                   + noise3(q * 2.03 + 7.3) * 0.30
+                   + noise3(q * 4.10 + 3.8) * 0.15;
         float Hsc = 0.20 + 0.60 * puff;             // irregular scale height
         float vert = exp(-(pos.z * pos.z) / (Hsc * Hsc));
         float xh = cylR / RIN;
@@ -458,6 +485,21 @@ void main(){
   vec3 bw    = texture2D(uBloomWide, vUv).rgb;
   vec3 fl    = texture2D(uFlare, vUv).rgb;
   vec3 c = s + b * uStrength + bw * uStrengthWide + fl * uStrengthFlare;
+
+  // --- lens ghosts: faint internal-reflection circles along the flare axis ---
+  // real anamorphic lenses bounce light between elements, producing dim,
+  // displaced ghost images of the bright source. Sampled from the same
+  // bright-pass, mirrored through the frame centre at two scales and masked
+  // to rings so they read as optics, not blobs.
+  vec2 ctr = vUv - 0.5;
+  vec2 gc1 = -ctr * 0.55 + 0.5;      // small ghost, opposite the source
+  vec2 gc2 = -ctr * 1.45 + 0.5;      // larger ghost, pushed past centre
+  float r1 = length(gc1 - 0.5) * 2.0;
+  float r2 = length(gc2 - 0.5) * 2.0;
+  float m1 = smoothstep(0.05, 0.35, r1) * (1.0 - smoothstep(0.75, 1.05, r1));
+  float m2 = smoothstep(0.05, 0.35, r2) * (1.0 - smoothstep(0.75, 1.05, r2));
+  c += texture2D(uFlare, gc1).rgb * vec3(1.00, 0.85, 0.62) * m1 * 0.16
+     + texture2D(uFlare, gc2).rgb * vec3(0.58, 0.66, 0.95) * m2 * 0.13;
 
   // --- cinematic grade ---
   // gentle shadow desaturation (film stocks lose chroma in the darks)
@@ -741,7 +783,7 @@ void main(){
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
     gl.uniform1i(uTex, 0);
-    gl.uniform1f(uThresh, 0.7);
+    gl.uniform1f(uThresh, 0.82);
     gl.uniform2f(uDir, 1.0 / BW, 0.0);
     quad(progBlur);
 
@@ -771,7 +813,7 @@ void main(){
     gl.bindFramebuffer(gl.FRAMEBUFFER, fA.fbo);
     gl.viewport(0, 0, QW, QH);
     gl.bindTexture(gl.TEXTURE_2D, sceneT.tex);
-    gl.uniform1f(uThresh, 0.8);
+    gl.uniform1f(uThresh, 0.88);
     gl.uniform2f(uDir, 2.0 / QW, 0.0);
     quad(progBlur);
 
@@ -797,9 +839,9 @@ void main(){
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, fB.tex);
     gl.uniform1i(gl.getUniformLocation(progComp, 'uFlare'), 3);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.5);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.9);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthFlare'), 0.45);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.28);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.38);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthFlare'), 0.24);
     gl.uniform2f(gl.getUniformLocation(progComp, 'uRes'), W, H);
     gl.uniform1f(gl.getUniformLocation(progComp, 'uTime'), time);
     quad(progComp);

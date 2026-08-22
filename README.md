@@ -18,10 +18,14 @@ rather than being faked.
 
 - **Geodesic integration** in the orbital plane of each ray — avoids the
   spherical-coordinate pole singularity entirely
-- **Doppler beaming + gravitational redshift** on the disk: the approaching
-  side is boosted blue-white, the receding side dimmed and redshifted
+- **Doppler beaming + gravitational redshift** on the disk: the asymmetry is
+  hard-bounded (a linear blend of the Doppler factor, clamped) so the
+  approaching side reads hotter without ever saturating to white, and the
+  shift is expressed as *temperature* — boosted plasma trends white-hot gold,
+  receding plasma deepens to ember. The palette never goes blue.
 - **Shakura–Sunyaev temperature profile** (T ∝ r^-3/4) mapped through a
-  blackbody color ramp; brightness peaks at the ISCO (r = 3 rs)
+  blackbody color ramp; brightness peaks at the ISCO (r = 3 rs) and decays
+  outward, so the near-camera edge of the disk stays dim and textured
 - **Keplerian differential rotation** of turbulent dust, with bounded winding
   (epoch crossfading) so clouds shear without dissolving into threads
 - **Wispy, semi-transparent outer disk edge** with front-to-back alpha
@@ -32,9 +36,12 @@ rather than being faked.
 - Three **world-space star shells** (r = 120/190/260) with true parallax,
   ~1/R² angular density, and rigid Keplerian drift (inner shells orbit
   faster, as anything bound that close must)
-- Procedural nebula band and hash-grid starfield
+- Procedural nebula band and hash-grid starfield, plus a **Milky Way band**:
+  a static great circle of ~3× denser, fainter stars and brighter nebulosity
 - Two-octave bloom (half-res + quarter-res) with a bright-pass threshold,
-  exponential tonemapping
+  anamorphic flare with mirrored **lens ghosts**, exponential tonemapping
+- **Volumetric haze** above/below the midplane giving the disk visible,
+  internally structured thickness
 
 ## Controls
 
