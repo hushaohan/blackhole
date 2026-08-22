@@ -50,6 +50,7 @@ rather than being faked.
 | Drag (mouse / one finger) | Orbit camera |
 | Scroll / pinch | Zoom (3.5–45 rs) |
 | Double-click | Reset view |
+| **Tune panel** (top-right) | Live sliders — brightness, doppler, falloff, texture, haze, bloom, flare, spin; `reset` restores defaults; settings persist in localStorage |
 
 The camera auto-orbits gently when idle.
 

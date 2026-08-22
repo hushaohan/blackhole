@@ -27,6 +27,33 @@
   }
   #hud .fpsbtn:hover { background: rgba(255,255,255,0.12); }
   #hud .fpsbtn:active { background: rgba(255,255,255,0.20); }
+  #tune {
+    position: fixed; top: 12px; right: 12px; width: 200px;
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,0.70);
+    background: rgba(8,8,10,0.55);
+    border: 1px solid rgba(255,255,255,0.14); border-radius: 8px;
+    padding: 8px 10px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    user-select: none; z-index: 5;
+  }
+  #tuneHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  #tuneHead b { color: #ffd8a0; letter-spacing: 0.08em; font-weight: bold; }
+  #tune button {
+    font: inherit; color: rgba(255,255,255,0.75);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+    padding: 1px 7px; margin-left: 4px; cursor: pointer;
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  #tune button:hover { background: rgba(255,255,255,0.12); }
+  .trow { margin-top: 5px; }
+  .trow label { display: flex; justify-content: space-between; opacity: 0.85; }
+  .trow .val { color: #ffd8a0; }
+  .trow input[type=range] {
+    width: 100%; height: 22px; margin: 2px 0 0;
+    accent-color: #ffb45e; background: transparent; cursor: pointer;
+  }
   #err {
     position: fixed; inset: 0; display: none;
     padding: 40px; color: #ff8080;
@@ -46,6 +73,7 @@
     <button class="fpsbtn" id="fpsUp" aria-label="Raise target fps by 5">+5</button>
   </div>
 </div>
+<div id="tune"></div>
 
 <script id="vsQuad" type="x-shader/x-vertex">
 attribute vec2 aPos;
@@ -71,6 +99,14 @@ uniform vec3  uRight;
 uniform vec3  uUp;
 uniform float uFov;     // tan(half vertical fov)
 uniform float uSpin;    // +1 / -1 disk rotation sense
+
+// --- live-tunable look knobs (driven by the on-screen TUNE panel) ---
+uniform float uSpinTime;    // pattern clock for disk rotation (rate-tunable)
+uniform float uDiskGain;    // disk emission exposure
+uniform float uBeamMix;     // Doppler beaming blend amount (0 = symmetric)
+uniform float uRadialDecay; // radial emission falloff steepness
+uniform float uTexContrast; // dust texture contrast
+uniform float uHazeGain;    // volumetric haze strength
 
 const float RS     = 1.0;   // Schwarzschild radius (units of rs)
 const float RIN    = 3.0;   // disk inner radius (ISCO-ish)
@@ -150,7 +186,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // disk to pure white (the "glare"). A linear blend of g stays expressive
   // yet strictly capped, so the left/right asymmetry survives without ever
   // saturating the plasma.
-  float beam = clamp(mix(1.0, g, 0.50), 0.70, 1.52);
+  float beam = clamp(mix(1.0, g, uBeamMix), 0.70, 1.52);
 
   // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
   // relativistic hue shift INSIDE the amber family: Doppler-boosted plasma
@@ -167,7 +203,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // Blend the two decay regimes across the ISCO (C1-continuous), so brightness
   // still peaks exactly at r = RIN but no hard ring appears there.
   float radialIn  = 1.9 * exp(-(1.0 - x) * 2.5) * smoothstep(RS, RS + 0.8, r);
-  float radialOut = 1.9 * exp(-(x - 1.0) * 1.25);
+  float radialOut = 1.9 * exp(-(x - 1.0) * uRadialDecay);
   float radial    = mix(radialIn, radialOut, smoothstep(0.75, 1.25, x));
   float innerAlpha = smoothstep(RS, RS + 1.2, r);   // optically thin near the horizon
 
@@ -192,8 +228,8 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   float OMAX = sqrt(0.5 / (RIN * RIN * RIN)) * spinMul;  // fastest angular velocity
   float TGEN = WIND_MAX / OMAX;                     // epoch length (~7.3 s)
 
-  float ep  = floor(uTime / TGEN);
-  float age = uTime - ep * TGEN;
+  float ep  = floor(uSpinTime / TGEN);
+  float age = uSpinTime - ep * TGEN;
   float u   = age / TGEN;
 
   float seedA = hash31(vec3(ep, 0.0, 0.0)) * 100.0;
@@ -219,7 +255,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   }
 
   // contrasty, filamentary dust: bright sheared threads, dark narrow lanes
-  float tex = 0.18 + 1.65 * smoothstep(0.30, 0.82, dust);
+  float tex = 0.18 + uTexContrast * smoothstep(0.30, 0.82, dust);
 
   // --- crisper outer edge: less wobble, narrower transparent fade ---
   float edge = ROUT + (dust - 0.5) * 1.6;           // ragged, rotating boundary
@@ -230,7 +266,7 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
                    smoothstep(ROUT - 2.5, ROUT, r));
   float alpha = clamp(fade * wisp * innerAlpha, 0.0, 1.0);
 
-  ocol = diskColor(t) * radial * tex * beam * 2.4;
+  ocol = diskColor(t) * radial * tex * beam * uDiskGain;
   oalpha = alpha;
 }
 
@@ -388,7 +424,7 @@ void main(){
       if (cylR >= RS + 0.05 && cylR <= ROUT + 2.0 && abs(pos.z) < 1.8) {
         float anH = atan(pos.y, pos.x);
         float omH = sqrt(0.5 / (cylR * cylR * cylR)) * 2.0 * uSpin;
-        float arH = anH - uTime * omH;
+        float arH = anH - uSpinTime * omH;
         vec2 rpH = cylR * vec2(cos(arH), sin(arH));
         // structured haze: the third octave plus a height-dependent noise
         // coordinate stratify the puffs into wispy layers, so the disk's
@@ -404,7 +440,7 @@ void main(){
                   * smoothstep(RS, RS + 0.9, cylR)
                   * (1.0 - smoothstep(ROUT - 1.0, ROUT + 2.0, cylR));
         float hz = vert * env * (0.30 + 0.95 * smoothstep(0.35, 0.85, puff));
-        col += (1.0 - alphaAcc) * diskColor(pow(clamp(RIN / cylR, 0.0, 1.0), 0.75)) * hz * h * 0.12;
+        col += (1.0 - alphaAcc) * diskColor(pow(clamp(RIN / cylR, 0.0, 1.0), 0.75)) * hz * h * uHazeGain;
       }
     }
 
@@ -717,6 +753,88 @@ void main(){
   document.getElementById('fpsDown').addEventListener('click', () => bumpTarget(-5));
   document.getElementById('fpsUp').addEventListener('click', () => bumpTarget(5));
 
+  // ---------- look-tuning panel ----------
+  // Real-time sliders for the key art-direction knobs. Each maps 1:1 onto a
+  // shader uniform (or a post weight), so dragging updates the very next
+  // frame with no shader recompiles. Settings persist in localStorage.
+  const SLIDERS = [
+    { id: 'diskGain',    label: 'brightness', min: 0.5, max: 5.0,  step: 0.05,  def: 2.4 },
+    { id: 'beamMix',     label: 'doppler',    min: 0.0, max: 1.0,  step: 0.01,  def: 0.50 },
+    { id: 'radialDecay', label: 'falloff',    min: 0.3, max: 3.0,  step: 0.05,  def: 1.25 },
+    { id: 'texContrast', label: 'texture',    min: 0.0, max: 3.0,  step: 0.05,  def: 1.65 },
+    { id: 'hazeGain',    label: 'haze',       min: 0.0, max: 0.4,  step: 0.005, def: 0.12 },
+    { id: 'bloomScale',  label: 'bloom',      min: 0.0, max: 2.5,  step: 0.05,  def: 1.0 },
+    { id: 'flareGain',   label: 'flare',      min: 0.0, max: 1.0,  step: 0.01,  def: 0.24 },
+    { id: 'spinRate',    label: 'spin',       min: 0.0, max: 3.0,  step: 0.05,  def: 1.0 },
+  ];
+  const vals = {};
+  SLIDERS.forEach(s => { vals[s.id] = s.def; });
+
+  let spinTime = 0;   // disk pattern clock, advanced by dt * spinRate.
+                      // Scaling the CLOCK (not TGEN) means epoch boundaries
+                      // stay continuous: changing speed never pops the pattern.
+
+  const TUNE_KEY = 'bh.tune.v1';
+  try {
+    const saved = JSON.parse(localStorage.getItem(TUNE_KEY) || '{}');
+    SLIDERS.forEach(s => {
+      if (typeof saved[s.id] === 'number' && saved[s.id] >= s.min && saved[s.id] <= s.max) {
+        vals[s.id] = saved[s.id];
+      }
+    });
+  } catch (_e) { /* storage unavailable (private mode) — defaults are fine */ }
+
+  let saveTimer = null;
+  function saveTune() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try { localStorage.setItem(TUNE_KEY, JSON.stringify(vals)); } catch (_e) {}
+    }, 250);
+  }
+
+  const tuneEl = document.getElementById('tune');
+  const decimals = s => Math.max(0, -Math.floor(Math.log10(s.step)));
+  tuneEl.innerHTML =
+    '<div id="tuneHead"><b>TUNE</b><span>' +
+    '<button id="tuneReset" title="Restore defaults">reset</button>' +
+    '<button id="tuneHide" title="Collapse panel">&ndash;</button></span></div>' +
+    '<div id="tuneRows">' +
+    SLIDERS.map(s =>
+      '<div class="trow"><label>' + s.label +
+      '<span class="val" id="val_' + s.id + '"></span></label>' +
+      '<input type="range" id="sl_' + s.id + '" min="' + s.min + '" max="' + s.max +
+      '" step="' + s.step + '"></div>'
+    ).join('') + '</div>';
+
+  function refreshTuneUI() {
+    SLIDERS.forEach(s => {
+      document.getElementById('sl_' + s.id).value = vals[s.id];
+      document.getElementById('val_' + s.id).textContent = vals[s.id].toFixed(decimals(s));
+    });
+  }
+  SLIDERS.forEach(s => {
+    document.getElementById('sl_' + s.id).addEventListener('input', e => {
+      vals[s.id] = parseFloat(e.target.value);
+      document.getElementById('val_' + s.id).textContent = vals[s.id].toFixed(decimals(s));
+      saveTune();
+    });
+  });
+  document.getElementById('tuneReset').addEventListener('click', () => {
+    SLIDERS.forEach(s => { vals[s.id] = s.def; });
+    refreshTuneUI();
+    saveTune();
+  });
+  const tuneRows = document.getElementById('tuneRows');
+  function setTuneHidden(h) {
+    tuneRows.style.display = h ? 'none' : '';
+    document.getElementById('tuneHide').innerHTML = h ? '+' : '&ndash;';
+  }
+  document.getElementById('tuneHide').addEventListener('click', () => {
+    setTuneHidden(tuneRows.style.display !== 'none');
+  });
+  refreshTuneUI();
+  setTuneHidden(coarse);   // start collapsed on touch devices to keep the view clean
+
   function adaptQuality(dt, fps) {
     qCooldown = Math.max(0, qCooldown - dt);
     if (qCooldown > 0) return;
@@ -745,6 +863,7 @@ void main(){
     const dt = Math.min((now - lastT) / 1000, 0.1);
     lastT = now;
     if (!dragging) yaw += 0.03 * dt; // gentle auto-orbit (time-based)
+    spinTime += dt * vals.spinRate;  // tunable disk-pattern clock
 
     // fps readout + adaptive quality (updated ~2x/sec)
     fpsAcc += dt; fpsN++;
@@ -770,6 +889,12 @@ void main(){
     gl.uniform3fv(gl.getUniformLocation(progScene, 'uUp'), cam.up);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uFov'), FOV);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uSpin'), spin);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uSpinTime'), spinTime);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uDiskGain'), vals.diskGain);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uBeamMix'), vals.beamMix);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uRadialDecay'), vals.radialDecay);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uTexContrast'), vals.texContrast);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uHazeGain'), vals.hazeGain);
     quad(progScene);
 
     // ---- bloom at half internal res: horizontal then vertical blur ----
@@ -839,9 +964,9 @@ void main(){
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, fB.tex);
     gl.uniform1i(gl.getUniformLocation(progComp, 'uFlare'), 3);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.28);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.38);
-    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthFlare'), 0.24);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrength'), 0.28 * vals.bloomScale);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthWide'), 0.38 * vals.bloomScale);
+    gl.uniform1f(gl.getUniformLocation(progComp, 'uStrengthFlare'), vals.flareGain);
     gl.uniform2f(gl.getUniformLocation(progComp, 'uRes'), W, H);
     gl.uniform1f(gl.getUniformLocation(progComp, 'uTime'), time);
     quad(progComp);
