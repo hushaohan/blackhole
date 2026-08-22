@@ -34,9 +34,10 @@ rather than being faked.
 
 ### Scene dressing
 
-- Three **world-space star shells** (r = 120/190/260) with true parallax,
-  ~1/R² angular density, and rigid Keplerian drift (inner shells orbit
-  faster, as anything bound that close must)
+- Three **world-space star shells** (r = 180/290/400) with true parallax,
+  ~1/R² angular density, rigid Keplerian drift (inner shells orbit faster, as
+  anything bound that close must), and per-star (t/R)² luminance compensation
+  so the shells never read as a visible "star ball" when zoomed out
 - Procedural nebula band and hash-grid starfield, plus a **Milky Way band**:
   a static great circle of ~3× denser, fainter stars and brighter nebulosity
 - Two-octave bloom (half-res + quarter-res) with a bright-pass threshold,

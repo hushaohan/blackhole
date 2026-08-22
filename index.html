@@ -299,13 +299,23 @@ vec3 sky(vec3 escPos){
   col += vec3(0.105, 0.098, 0.135) * band * band * (0.35 + 0.65 * neb * neb);
 
   // point stars on three depth layers. Stars are anchored in WORLD space on
-  // spherical shells around the hole (radii 120/190/260 — well outside the
+  // spherical shells around the hole (radii 180/290/400 — well outside the
   // disk): each ray is intersected with its shell and the hash grid is
   // evaluated at that fixed world point. Because star positions don't depend
   // on the camera, orbiting and zooming only shift their apparent position
   // smoothly (true parallax — near shells slide against far ones) instead of
   // re-rolling the hash and making stars pop in/out.
   //
+  // CAMERA-DISTANCE COMPENSATION: a finite shell is only truly invisible as
+  // a "sphere" if the sky it produces doesn't change with where the camera
+  // is. Angular star density on a shell goes as 1/d² (d = camera->shell
+  // distance), so zooming far out makes the NEAR side of each shell (the
+  // anti-hole sky) denser and bigger-starred than the far side — the scene
+  // starts to look like it sits inside a star ball. Multiplying each star's
+  // luminance by (t/R)² exactly cancels that: total starlight per solid
+  // angle is then camera-independent, while positions still parallax and
+  // sizes still carry a gentle depth cue. The compensation is continuous in
+  // camera motion, so nothing pops.
   // Each shell rotates rigidly at its Keplerian angular velocity
   // w = sqrt(0.5/R^3), so the inner shell drifts ~3x faster than the outer
   // ones (differential rotation). The pattern is static in the co-rotating
@@ -319,7 +329,7 @@ vec3 sky(vec3 escPos){
   vec3 dc = normalize(escPos - uEye);   // ray direction as seen from camera
   float eyeR2 = dot(uEye, uEye);
   for (int i = 0; i < 3; i++) {
-    float R = 120.0 + float(i) * 70.0;            // world-space shell radius
+    float R = 180.0 + float(i) * 110.0;           // world-space shell radius
     // ray-sphere intersection; camera (dist <= 45) is always inside, so the
     // forward hit always exists
     float b = dot(uEye, dc);
@@ -339,13 +349,16 @@ vec3 sky(vec3 escPos){
     // equal angular density base; ~3x denser inside the Milky Way band
     float thr = 1.0 - (1100.0 / (R * R)) * (1.0 + 2.2 * bandS);
     if (h > thr) {
-      float star = 1.0 - clamp(length(fp) / 0.13, 0.0, 1.0);
+      float star = 1.0 - clamp(length(fp) / 0.20, 0.0, 1.0);
       float b2 = star * star;                     // tiny, sharp pinpoints
       vec3 tint = mix(vec3(0.7, 0.75, 1.0), vec3(1.0, 0.85, 0.6), hash31(idp + vec3(5, 0, 0)));
       // band crowd is fainter per-star, so it reads as a milky river of
-      // resolved points rather than a brighter stripe
-      float lum = (4.0 + 22.0 * hash31(idp + vec3(0, 9, 0))) * (120.0 / R)
-                * (1.0 - 0.40 * bandS);
+      // resolved points rather than a brighter stripe. (t/R)² is the
+      // camera-distance compensation described above. Sprite 0.20 and the
+      // 190 base preserve the original apparent size/brightness at typical
+      // viewing distance now that the shells sit 1.5x farther out.
+      float lum = (4.0 + 22.0 * hash31(idp + vec3(0, 9, 0))) * (190.0 / R)
+                * ((t * t) / (R * R)) * (1.0 - 0.40 * bandS);
       col += tint * b2 * lum;
     }
   }
