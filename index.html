@@ -103,7 +103,7 @@ uniform float uSpin;    // +1 / -1 disk rotation sense
 // --- live-tunable look knobs (driven by the on-screen TUNE panel) ---
 uniform float uSpinTime;    // pattern clock for disk rotation (rate-tunable)
 uniform float uDiskGain;    // disk emission exposure
-uniform float uBeamMix;     // Doppler beaming blend amount (0 = symmetric)
+uniform float uBeamPow;     // Doppler beaming exponent (0 = symmetric, 4 ≈ physical g^4)
 uniform float uRadialDecay; // radial emission falloff steepness
 uniform float uTexContrast; // dust texture contrast
 uniform float uHazeGain;    // volumetric haze strength
@@ -133,6 +133,14 @@ float noise3(vec3 p){
 float fbm(vec3 p){
   float a = 0.5, s = 0.0;
   for(int i=0;i<4;i++){ s += a * noise3(p); p *= 2.03; a *= 0.5; }
+  return s;
+}
+// 3-octave variant for the domain-WARP fields (w1/w2): their output only
+// perturbs the sample coordinates of another fbm, so the lost octave is
+// invisible — and each skipped octave saves a full noise3 (8 hash evals).
+float fbmW(vec3 p){
+  float a = 0.5, s = 0.0;
+  for(int i=0;i<3;i++){ s += a * noise3(p); p *= 2.03; a *= 0.5; }
   return s;
 }
 
@@ -181,19 +189,23 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   float gGrav = sqrt(A(r));                          // gravitational redshift
   float g = gDop * gGrav;
 
-  // Doppler beaming kept but HARD-BOUNDED for the Interstellar look: the old
-  // pow(g,3) term reached ~2.3-5.7x, clipping the approaching half of the
-  // disk to pure white (the "glare"). A linear blend of g stays expressive
-  // yet strictly capped, so the left/right asymmetry survives without ever
-  // saturating the plasma.
-  float beam = clamp(mix(1.0, g, uBeamMix), 0.70, 1.52);
+  // Doppler beaming as a POWER of the total shift g: 0 = perfectly symmetric,
+  // 1 = linear boost, 3-4 ≈ the physical I ∝ g^(3..4) law. Because the disk's
+  // outer edge is feathered semi-transparent wisps, a strong exponent makes
+  // the approaching side's wisps stay visible far beyond where the receding
+  // side fades — so the VISIBLE outline of the disk becomes genuinely
+  // asymmetric, not just its brightness. The upper clamp grows with the
+  // setting: high values stay dramatic without flooding the frame with white.
+  float beam = clamp(pow(g, uBeamPow), 0.50, 1.60 + 0.35 * uBeamPow);
 
   // temperature: Shakura-Sunyaev thin disk, T ∝ r^(-3/4)
   // relativistic hue shift INSIDE the amber family: Doppler-boosted plasma
   // reads hotter (toward white-hot gold), receding plasma reads cooler
   // (deeper ember/copper) — the same physics the film's color story implies,
   // expressed as temperature instead of raw brightness. Never blue.
-  float gT = clamp(pow(g, 0.55), 0.62, 1.30);
+  // hue shift widens with the beaming setting: strong beaming splits the
+  // disk into hot white-gold (approaching) and deep ember (receding)
+  float gT = clamp(pow(g, 0.40 + 0.20 * uBeamPow), 0.55, 1.45);
   float t = pow(clamp(RIN / r, 0.0, 1.0), 0.75) * gT;
 
   // --- radial structure (physically motivated) ---
@@ -238,8 +250,8 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
   // generation A: born at the epoch start, rotated by age*omega since birth
   float arA = an - age * omega * spinMul * uSpin;
   vec2 rpA = r * vec2(cos(arA), sin(arA));
-  float w1A = fbm(vec3(rpA * 1.8, seedA + 3.1));
-  float w2A = fbm(vec3(rpA * 1.8 + vec2(5.2, 1.3), seedA + 7.7));
+  float w1A = fbmW(vec3(rpA * 1.8, seedA + 3.1));
+  float w2A = fbmW(vec3(rpA * 1.8 + vec2(5.2, 1.3), seedA + 7.7));
   float dust = fbm(vec3(rpA * 2.6 + 2.6 * vec2(w1A, w2A), seedA + 1.9));
 
   // crossfade into generation B over the last 35% of the epoch.
@@ -248,8 +260,8 @@ void diskEmission(vec3 hit, vec3 khat, float r, out vec3 ocol, out float oalpha)
     float ageB = age - TGEN;   // B isn't born yet: negative age = pre-rotation
     float arB = an - ageB * omega * spinMul * uSpin;
     vec2 rpB = r * vec2(cos(arB), sin(arB));
-    float w1B = fbm(vec3(rpB * 1.8, seedB + 3.1));
-    float w2B = fbm(vec3(rpB * 1.8 + vec2(5.2, 1.3), seedB + 7.7));
+    float w1B = fbmW(vec3(rpB * 1.8, seedB + 3.1));
+    float w2B = fbmW(vec3(rpB * 1.8 + vec2(5.2, 1.3), seedB + 7.7));
     float dustB = fbm(vec3(rpB * 2.6 + 2.6 * vec2(w1B, w2B), seedB + 1.9));
     dust = mix(dust, dustB, smoothstep(0.65, 1.0, u));
   }
@@ -421,7 +433,14 @@ void main(){
     // opacity), so it never hides the lensed images behind it.
     {
       float cylR = length(pos.xy);
-      if (cylR >= RS + 0.05 && cylR <= ROUT + 2.0 && abs(pos.z) < 1.8) {
+      // Performance: haze is a smooth, low-frequency glow, so it is sampled
+      // on every OTHER integrator step at double weight (same integral), and
+      // skipped entirely where its tallest possible Gaussian column is
+      // already <1% — one exp instead of three noise octaves. Together these
+      // remove most of the haze cost, which dominates edge-on views.
+      if (cylR >= RS + 0.05 && cylR <= ROUT + 2.0
+          && ((i & 1) == 0)
+          && exp(-pos.z * pos.z / 0.64) > 0.010) {
         float anH = atan(pos.y, pos.x);
         float omH = sqrt(0.5 / (cylR * cylR * cylR)) * 2.0 * uSpin;
         float arH = anH - uSpinTime * omH;
@@ -440,7 +459,7 @@ void main(){
                   * smoothstep(RS, RS + 0.9, cylR)
                   * (1.0 - smoothstep(ROUT - 1.0, ROUT + 2.0, cylR));
         float hz = vert * env * (0.30 + 0.95 * smoothstep(0.35, 0.85, puff));
-        col += (1.0 - alphaAcc) * diskColor(pow(clamp(RIN / cylR, 0.0, 1.0), 0.75)) * hz * h * uHazeGain;
+        col += (1.0 - alphaAcc) * diskColor(pow(clamp(RIN / cylR, 0.0, 1.0), 0.75)) * hz * h * (uHazeGain * 2.0);
       }
     }
 
@@ -450,8 +469,15 @@ void main(){
       break;
     }
 
-    // escaped -> background, seen through any remaining transparency
-    if (r2 > RESC) {
+    // escaped -> background, seen through any remaining transparency.
+    // Short-circuit: an outward-moving photon beyond the disk's outer fade
+    // is past perihelion in the weak field and can never curve back, and
+    // light bending out here is negligible — so sample the sky immediately
+    // instead of marching ~60 flat-space steps out to RESC. Identical
+    // picture, far fewer steps per sky pixel. (The threshold matches the
+    // disk-crossing test's upper bound exactly, so no legal crossing is
+    // ever skipped.)
+    if (r2 > RESC || (drdl2 > 0.0 && r2 > ROUT + RFADE + 2.5)) {
       col += (1.0 - alphaAcc) * sky(pos);
       done = true;
       break;
@@ -759,7 +785,7 @@ void main(){
   // frame with no shader recompiles. Settings persist in localStorage.
   const SLIDERS = [
     { id: 'diskGain',    label: 'brightness', min: 0.5, max: 5.0,  step: 0.05,  def: 2.4 },
-    { id: 'beamMix',     label: 'doppler',    min: 0.0, max: 1.0,  step: 0.01,  def: 0.50 },
+    { id: 'beamPow',     label: 'doppler',    min: 0.0, max: 4.0,  step: 0.05,  def: 0.65 },
     { id: 'radialDecay', label: 'falloff',    min: 0.3, max: 3.0,  step: 0.05,  def: 1.25 },
     { id: 'texContrast', label: 'texture',    min: 0.0, max: 3.0,  step: 0.05,  def: 1.65 },
     { id: 'hazeGain',    label: 'haze',       min: 0.0, max: 0.4,  step: 0.005, def: 0.12 },
@@ -891,7 +917,7 @@ void main(){
     gl.uniform1f(gl.getUniformLocation(progScene, 'uSpin'), spin);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uSpinTime'), spinTime);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uDiskGain'), vals.diskGain);
-    gl.uniform1f(gl.getUniformLocation(progScene, 'uBeamMix'), vals.beamMix);
+    gl.uniform1f(gl.getUniformLocation(progScene, 'uBeamPow'), vals.beamPow);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uRadialDecay'), vals.radialDecay);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uTexContrast'), vals.texContrast);
     gl.uniform1f(gl.getUniformLocation(progScene, 'uHazeGain'), vals.hazeGain);

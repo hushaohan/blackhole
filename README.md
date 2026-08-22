@@ -18,11 +18,12 @@ rather than being faked.
 
 - **Geodesic integration** in the orbital plane of each ray — avoids the
   spherical-coordinate pole singularity entirely
-- **Doppler beaming + gravitational redshift** on the disk: the asymmetry is
-  hard-bounded (a linear blend of the Doppler factor, clamped) so the
-  approaching side reads hotter without ever saturating to white, and the
-  shift is expressed as *temperature* — boosted plasma trends white-hot gold,
-  receding plasma deepens to ember. The palette never goes blue.
+- **Doppler beaming + gravitational redshift** on the disk: a tunable
+  exponent on the Doppler factor (0 = symmetric, 3–4 ≈ the physical
+  I ∝ g^(3–4) law), clamped so the approaching side can be dramatic without
+  flooding the frame with white. The shift is also expressed as *temperature*
+  — boosted plasma trends white-hot gold, receding plasma deepens to ember.
+  The palette never goes blue.
 - **Shakura–Sunyaev temperature profile** (T ∝ r^-3/4) mapped through a
   blackbody color ramp; brightness peaks at the ISCO (r = 3 rs) and decays
   outward, so the near-camera edge of the disk stays dim and textured
